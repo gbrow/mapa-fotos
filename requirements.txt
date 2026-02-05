@@ -3,3 +3,4 @@ Flask-CORS
 Pillow
 exifread
 gunicorn
+requests==2.31.0
