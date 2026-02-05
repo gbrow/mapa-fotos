@@ -7,6 +7,9 @@ from flask import Flask, jsonify, send_file, send_from_directory, request
 from flask_cors import CORS
 from PIL import Image, ImageOps
 import json
+import requests
+from io import BytesIO
+import os
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
@@ -98,6 +101,110 @@ def processar_fotos():
     
     return fotos_data
 
+
+# Configurações do Google Drive
+DRIVE_FOLDER_ID = "1SVEBHhbeQ4R3_QJLx7cHU93qBUFOa1g2"  # Cole o ID aqui
+DRIVE_API_KEY = os.environ.get('GOOGLE_DRIVE_API_KEY', '')  # Opcional
+
+def listar_arquivos_drive():
+    """Lista arquivos da pasta do Google Drive"""
+    url = f"https://www.googleapis.com/drive/v3/files"
+    params = {
+        'q': f"'{DRIVE_FOLDER_ID}' in parents",
+        'key': DRIVE_API_KEY if DRIVE_API_KEY else None,
+        'fields': 'files(id, name, mimeType, size)'
+    }
+    
+    try:
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            return response.json().get('files', [])
+    except Exception as e:
+        print(f"Erro ao acessar Google Drive: {e}")
+    
+    return []
+
+def baixar_do_drive(file_id, filename):
+    """Baixa um arquivo do Google Drive"""
+    # URL para download direto
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    
+    try:
+        response = requests.get(download_url, stream=True)
+        if response.status_code == 200:
+            caminho_local = os.path.join(FOTOS_FOLDER, filename)
+            
+            # Salvar arquivo localmente (temporário)
+            with open(caminho_local, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            return caminho_local
+    except Exception as e:
+        print(f"Erro ao baixar {filename}: {e}")
+    
+    return None
+
+def processar_fotos_do_drive():
+    """Processa fotos diretamente do Google Drive"""
+    arquivos_drive = listar_arquivos_drive()
+    fotos_data = []
+    
+    for arquivo in arquivos_drive:
+        filename = arquivo['name']
+        
+        # Verificar se é imagem
+        if not filename.lower().endswith(('.jpg', '.jpeg', '.png', '.heic')):
+            continue
+        
+        print(f"📥 Processando do Drive: {filename}")
+        
+        # Baixar arquivo temporariamente
+        caminho_temp = baixar_do_drive(arquivo['id'], filename)
+        if not caminho_temp:
+            continue
+        
+        try:
+            # Extrair EXIF
+            with open(caminho_temp, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+            
+            lat, lon = extrair_coordenadas(tags)
+            
+            if lat is not None and lon is not None:
+                # Criar thumbnail (salva localmente)
+                thumb_path = os.path.join(THUMBNAIL_FOLDER, filename)
+                if not os.path.exists(thumb_path):
+                    with Image.open(caminho_temp) as img:
+                        img = ImageOps.exif_transpose(img)
+                        img.thumbnail(THUMBNAIL_SIZE)
+                        if img.mode in ('RGBA', 'LA', 'P'):
+                            img = img.convert('RGB')
+                        img.save(thumb_path, 'JPEG', quality=85)
+                
+                # URL direta para a imagem no Drive (para visualização)
+                drive_url = f"https://drive.google.com/uc?export=view&id={arquivo['id']}"
+                
+                fotos_data.append({
+                    'filename': filename,
+                    'latitude': float(lat),
+                    'longitude': float(lon),
+                    'thumbnail': f'/thumbnail/{filename}',  # Thumb local
+                    'full_image': drive_url,  # Imagem original do Drive
+                    'data_tirada': str(tags.get('EXIF DateTimeOriginal', ''))
+                })
+                
+        except Exception as e:
+            print(f"❌ Erro ao processar {filename}: {e}")
+        
+        # Remover arquivo temporário
+        try:
+            os.remove(caminho_temp)
+        except:
+            pass
+    
+    return fotos_data
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -106,8 +213,25 @@ def index():
 def serve_static(filename):
     return send_from_directory('.', filename)
 
+#@app.route('/api/fotos')
+#def listar_fotos():
+#    try:
+#        if os.path.exists(CACHE_FILE):
+#            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+#                return jsonify(json.load(f))
+#    except:
+#        pass
+#    
+#    return jsonify(processar_fotos())
+
 @app.route('/api/fotos')
 def listar_fotos():
+    """Retorna lista de fotos (do Drive ou local)"""
+    # Usar Drive se configurado
+    if DRIVE_FOLDER_ID:
+        return jsonify(processar_fotos_do_drive())
+    
+    # Fallback para local
     try:
         if os.path.exists(CACHE_FILE):
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
