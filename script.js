@@ -350,7 +350,7 @@ class MapaFotos {
         if (!foto) return;
         
         this.currentFoto = foto;
-        this.modalImg.src = `${this.baseURL}${foto.full_image}`;
+        this.modalImg.src = `${foto.full_image}`;
         this.modalImg.alt = foto.filename;
         this.modalImg.style.cursor = 'grab';
         
