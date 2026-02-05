@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🗺️ Mapa de Fotos com GPS</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📷</text></svg>">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📷 Mapa de Fotos com GPS</h1>
+            <p>Clique nos marcadores vermelhos para ver as fotos</p>
+            <div id="status">🔄 Inicializando...</div>
+        </header>
+        
+        <main>
+            <div class="map-container">
+                <div id="map"></div>
+            </div>
+            
+            <div class="sidebar">
+                <div class="card">
+                    <h3>📸 Detalhes da Foto</h3>
+                    <div id="foto-container">
+                        <p style="text-align: center; color: #666; padding: 20px;">
+                            Clique em um marcador no mapa
+                        </p>
+                    </div>
+                    <div id="foto-details">
+                        <div class="detail-item">
+                            <span class="label">Arquivo:</span>
+                            <span id="nome-arquivo" class="value">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="label">Coordenadas:</span>
+                            <span id="coordenadas" class="value">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="label">Data:</span>
+                            <span id="data" class="value">-</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3>📂 Todas as Fotos</h3>
+                    <div id="lista-container">
+                        <p style="text-align: center; color: #666; padding: 10px;">
+                            Carregando fotos...
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- Modal para foto grande -->
+    <div id="modal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <div class="zoom-indicator">100%</div>
+            <img id="modal-img">
+            <div id="modal-caption"></div>
+            <div class="shortcut-hint">
+                🎮 Atalhos: ← → navegar • Ctrl + + - zoom • Ctrl + 0 reset • Esc fechar
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/script.js"></script>
+</body>
+</html>
