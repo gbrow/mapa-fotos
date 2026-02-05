@@ -137,73 +137,49 @@ def servir_thumbnail(nome_arquivo):
     return 'Thumbnail não encontrada', 404
 
 @app.route('/upload', methods=['GET', 'POST'])
-def upload():
-    """Página para upload de fotos"""
+def upload_simple():
+    """Versão simplificada com múltiplos arquivos"""
     if request.method == 'POST':
-        if 'foto' not in request.files:
+        if 'fotos' not in request.files:
             return 'Nenhum arquivo selecionado'
         
-        arquivo = request.files['foto']
-        if arquivo.filename == '':
-            return 'Nenhum arquivo selecionado'
+        arquivos = request.files.getlist('fotos')
+        contador = 0
         
-        if arquivo and arquivo.filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-            from werkzeug.utils import secure_filename
-            filename = secure_filename(arquivo.filename)
-            caminho = os.path.join(FOTOS_FOLDER, filename)
-            arquivo.save(caminho)
-            
-            # Reprocessar fotos
-            processar_fotos()
-            
-            return f'''
-                <html>
-                <body style="font-family: Arial; padding: 20px;">
-                    <h1>✅ Upload realizado!</h1>
-                    <p>Arquivo: <strong>{filename}</strong></p>
-                    <p>A foto foi processada e aparecerá no mapa.</p>
-                    <a href="/" style="display: inline-block; background: #667eea; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Voltar ao Mapa</a>
-                    <br><br>
-                    <a href="/upload" style="color: #667eea;">Enviar outra foto</a>
-                </body>
-                </html>
-            '''
+        for arquivo in arquivos:
+            if arquivo.filename != '':
+                filename = secure_filename(arquivo.filename)
+                arquivo.save(os.path.join(FOTOS_FOLDER, filename))
+                contador += 1
+        
+        # Reprocessar tudo
+        processar_fotos()
+        
+        return f'''
+            <html>
+            <body style="font-family: Arial; padding: 30px;">
+                <h1>✅ Upload realizado!</h1>
+                <p>{contador} foto(s) enviada(s) com sucesso.</p>
+                <p>As fotos estão sendo processadas...</p>
+                <br>
+                <a href="/" style="background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none;">Ver Mapa</a>
+                <a href="/upload" style="background: #008CBA; color: white; padding: 10px 20px; text-decoration: none; margin-left: 10px;">Novo Upload</a>
+            </body>
+            </html>
+        '''
     
     return '''
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>Upload de Fotos</title>
-        <style>
-            body { font-family: Arial; padding: 40px; max-width: 500px; margin: 0 auto; }
-            h1 { color: #333; }
-            form { background: #f5f5f5; padding: 30px; border-radius: 10px; }
-            input[type="file"] { padding: 10px; border: 2px dashed #ccc; width: 100%; }
-            input[type="submit"] { background: #667eea; color: white; border: none; padding: 12px 24px; border-radius: 5px; cursor: pointer; margin-top: 15px; }
-            a { color: #667eea; text-decoration: none; display: inline-block; margin-top: 20px; }
-        </style>
-    </head>
-    <body>
-        <h1>📤 Upload de Fotos</h1>
-        <p>Envie fotos com coordenadas GPS para aparecerem no mapa.</p>
-        
+    <head><title>Upload Múltiplo</title></head>
+    <body style="font-family: Arial; padding: 30px;">
+        <h1>Upload de Múltiplas Fotos</h1>
         <form method="post" enctype="multipart/form-data">
-            <input type="file" name="foto" accept=".jpg,.jpeg,.png" required>
+            <input type="file" name="fotos" multiple accept=".jpg,.jpeg,.png">
             <br><br>
-            <input type="submit" value="Enviar Foto">
+            <input type="submit" value="Enviar Todas">
         </form>
-        
-        <a href="/">← Voltar ao mapa</a>
-        
-        <div style="margin-top: 30px; padding: 15px; background: #e3f2fd; border-radius: 5px;">
-            <h3>💡 Dicas:</h3>
-            <ul>
-                <li>Fotos devem ter metadados GPS</li>
-                <li>Formatos aceitos: JPG, JPEG, PNG</li>
-                <li>Tamanho máximo: 10MB</li>
-                <li>Após upload, atualize a página do mapa</li>
-            </ul>
-        </div>
+        <p><small>Segure Ctrl (Windows) ou Cmd (Mac) para selecionar múltiplos arquivos</small></p>
     </body>
     </html>
     '''
