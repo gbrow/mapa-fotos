@@ -5,8 +5,9 @@ from flask_cors import CORS
 import json
 import time
 import hashlib
-from PIL import Image
+from PIL import Image, ImageOps
 from io import BytesIO
+import exifread  # ADICIONE ESTE IMPORT
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
@@ -81,35 +82,210 @@ def listar_arquivos_github():
         print(f"❌ Erro ao conectar ao GitHub: {e}")
         return []
 
-def criar_thumbnail_da_url(url, filename):
-    """Cria thumbnail a partir de uma URL"""
+def extrair_coordenadas_exif(image_data):
+    """Extrai coordenadas GPS dos metadados EXIF"""
     try:
-        # Gerar nome único para thumbnail
+        # Usar exifread para extrair metadados
+        tags = exifread.process_file(image_data, details=False)
+        
+        # Função para converter coordenadas EXIF para decimal
+        def converter_para_decimal(tag):
+            try:
+                degrees = tag.values[0].num / tag.values[0].den
+                minutes = tag.values[1].num / tag.values[1].den
+                seconds = tag.values[2].num / tag.values[2].den
+                return degrees + (minutes / 60.0) + (seconds / 3600.0)
+            except:
+                return None
+        
+        # Extrair latitude
+        latitude = None
+        longitude = None
+        
+        if 'GPS GPSLatitude' in tags and 'GPS GPSLongitude' in tags:
+            latitude = converter_para_decimal(tags['GPS GPSLatitude'])
+            longitude = converter_para_decimal(tags['GPS GPSLongitude'])
+            
+            # Ajustar para hemisfério sul/oeste
+            if latitude is not None and longitude is not None:
+                if 'GPS GPSLatitudeRef' in tags and tags['GPS GPSLatitudeRef'].values == 'S':
+                    latitude = -latitude
+                if 'GPS GPSLongitudeRef' in tags and tags['GPS GPSLongitudeRef'].values == 'W':
+                    longitude = -longitude
+        
+        return latitude, longitude
+        
+    except Exception as e:
+        print(f"⚠️  Erro ao extrair EXIF: {e}")
+        return None, None
+
+def extrair_data_exif(image_data):
+    """Extrai data dos metadados EXIF"""
+    try:
+        tags = exifread.process_file(image_data, details=False)
+        
+        # Tentar vários campos de data
+        date_fields = [
+            'EXIF DateTimeOriginal',
+            'Image DateTime',
+            'EXIF DateTimeDigitized',
+            'EXIF SubSecTimeOriginal'
+        ]
+        
+        for field in date_fields:
+            if field in tags:
+                return str(tags[field])
+        
+        return None
+    except:
+        return None
+
+def processar_imagem_com_exif(url, filename):
+    """Processa imagem extraindo coordenadas EXIF reais"""
+    try:
+        print(f"📥 Processando: {filename}")
+        
+        # Baixar imagem
+        response = requests.get(url, timeout=30, stream=True)
+        if response.status_code != 200:
+            print(f"  ❌ Erro ao baixar: {response.status_code}")
+            return None
+        
+        # Ler imagem em memória
+        img_bytes = BytesIO(response.content)
+        
+        # Extrair EXIF (precisa ler como bytes)
+        img_bytes.seek(0)
+        latitude, longitude = extrair_coordenadas_exif(img_bytes)
+        
+        # Extrair data
+        img_bytes.seek(0)
+        data_tirada = extrair_data_exif(img_bytes)
+        
+        # Se não tem coordenadas GPS, pular esta imagem
+        if latitude is None or longitude is None:
+            print(f"  ⚠️  Sem coordenadas GPS: {filename}")
+            return None
+        
+        print(f"  📍 Coordenadas encontradas: {latitude:.6f}, {longitude:.6f}")
+        
+        # Gerar thumbnail
+        img_bytes.seek(0)
         thumb_hash = hashlib.md5(url.encode()).hexdigest()[:12]
         thumb_name = f"{thumb_hash}.jpg"
         thumb_path = os.path.join(THUMBNAIL_FOLDER, thumb_name)
         
-        # Se já existe, retornar
-        if os.path.exists(thumb_path):
-            return thumb_name
+        # Criar thumbnail se não existir
+        if not os.path.exists(thumb_path):
+            try:
+                img_bytes.seek(0)
+                img = Image.open(img_bytes)
+                
+                # Corrigir orientação EXIF
+                img = ImageOps.exif_transpose(img)
+                
+                # Redimensionar
+                img.thumbnail(THUMBNAIL_SIZE)
+                
+                # Converter formato se necessário
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+                
+                # Salvar thumbnail
+                img.save(thumb_path, 'JPEG', quality=85, optimize=True)
+                print(f"  ✅ Thumbnail criada")
+                
+            except Exception as e:
+                print(f"  ⚠️  Erro ao criar thumbnail: {e}")
+                thumb_name = None
         
-        # Baixar imagem e criar thumbnail
-        response = requests.get(url, timeout=30)
-        if response.status_code == 200:
-            img = Image.open(BytesIO(response.content))
-            img.thumbnail(THUMBNAIL_SIZE)
-            
-            if img.mode in ('RGBA', 'LA', 'P'):
-                img = img.convert('RGB')
-            
-            img.save(thumb_path, 'JPEG', quality=80, optimize=True)
-            print(f"  ✅ Thumbnail criada: {filename}")
-            return thumb_name
-            
+        return {
+            'filename': filename,
+            'original_url': url,
+            'thumbnail': f'/thumbnail/{thumb_name}' if thumb_name else None,
+            'full_image': url,
+            'latitude': float(latitude),
+            'longitude': float(longitude),
+            'data_tirada': data_tirada or 'Data não disponível',
+            'processed_at': time.time()
+        }
+        
     except Exception as e:
-        print(f"  ⚠️  Erro ao criar thumbnail: {e}")
-    
-    return None
+        print(f"❌ Erro ao processar {filename}: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def processar_kml_simples(kml_url, filename):
+    """Processa KML de forma simplificada"""
+    try:
+        print(f"🗺️ Processando KML: {filename}")
+        
+        response = requests.get(kml_url, timeout=30)
+        if response.status_code != 200:
+            return []
+        
+        content = response.text
+        
+        # Extrair coordenadas de forma simples
+        import re
+        
+        trajetos = []
+        
+        # Buscar por Placemarks
+        placemark_pattern = r'<Placemark>.*?</Placemark>'
+        placemarks = re.findall(placemark_pattern, content, re.DOTALL)
+        
+        for placemark in placemarks:
+            # Extrair nome
+            name_match = re.search(r'<name>([^<]+)</name>', placemark)
+            name = name_match.group(1) if name_match else filename
+            
+            # Extrair descrição
+            desc_match = re.search(r'<description>([^<]+)</description>', placemark)
+            description = desc_match.group(1) if desc_match else ''
+            
+            # Extrair coordenadas
+            coords_match = re.search(r'<coordinates>([^<]+)</coordinates>', placemark, re.DOTALL)
+            if coords_match:
+                coordenadas = []
+                coords_text = coords_match.group(1).strip()
+                
+                # Processar coordenadas
+                for line in coords_text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    for coord in line.split():
+                        parts = coord.split(',')
+                        if len(parts) >= 2:
+                            try:
+                                # KML: longitude, latitude, altitude
+                                lon = float(parts[0])
+                                lat = float(parts[1])
+                                coordenadas.append([lat, lon])  # Leaflet: lat, lon
+                            except ValueError:
+                                continue
+                
+                if len(coordenadas) > 1:
+                    trajetos.append({
+                        'type': 'LineString',
+                        'name': name,
+                        'description': description,
+                        'filename': filename,
+                        'coordinates': coordenadas,
+                        'color': '#FF0000',
+                        'weight': 3,
+                        'opacity': 0.7
+                    })
+                    print(f"  ✅ Trajeto '{name}' com {len(coordenadas)} pontos")
+        
+        return trajetos
+        
+    except Exception as e:
+        print(f"❌ Erro ao processar KML {filename}: {e}")
+        return []
 
 def processar_arquivos():
     """Processa arquivos do GitHub"""
@@ -125,52 +301,28 @@ def processar_arquivos():
     fotos = []
     trajetos = []
     
-    # Contadores
-    total_imagens = 0
-    total_kmls = 0
-    
     for filename in arquivos:
         url = get_github_raw_url(filename)
         
-        # Processar imagens
-        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
-            total_imagens += 1
-            
-            thumb_name = criar_thumbnail_da_url(url, filename)
-            
-            if thumb_name:
-                # Coordenadas de exemplo (centro do Brasil com variação)
-                import random
-                lat_base = -15.7942
-                lon_base = -47.8822
-                
-                fotos.append({
-                    'filename': filename,
-                    'original_url': url,
-                    'thumbnail': f'/thumbnail/{thumb_name}',
-                    'full_image': url,
-                    'latitude': lat_base + (random.random() - 0.5) * 5,
-                    'longitude': lon_base + (random.random() - 0.5) * 5,
-                    'data_tirada': '2024-01-01'
-                })
+        # Processar imagens (APENAS JPG/JPEG que têm EXIF)
+        if filename.lower().endswith(('.jpg', '.jpeg')):
+            print(f"\n📸 Processando imagem: {filename}")
+            foto = processar_imagem_com_exif(url, filename)
+            if foto:
+                fotos.append(foto)
+                print(f"  ✅ Adicionada: {foto['latitude']:.6f}, {foto['longitude']:.6f}")
         
-        # Processar KMLs (simplificado - apenas marca como existente)
+        # Processar KMLs
         elif filename.lower().endswith('.kml'):
-            total_kmls += 1
-            trajetos.append({
-                'type': 'LineString',
-                'name': f'Trajeto: {filename}',
-                'filename': filename,
-                'coordinates': [
-                    [-15.7942, -47.8822],
-                    [-15.8000, -47.8900],
-                    [-15.8100, -47.9000]
-                ],
-                'color': '#FF0000',
-                'weight': 3,
-                'opacity': 0.7
-            })
-            print(f"  🗺️  KML encontrado: {filename}")
+            print(f"\n🗺️ Processando KML: {filename}")
+            trajetos_kml = processar_kml_simples(url, filename)
+            if trajetos_kml:
+                trajetos.extend(trajetos_kml)
+    
+    # Se não encontrou fotos com EXIF, adicionar mensagem
+    if len(fotos) == 0:
+        print("\n⚠️  Nenhuma foto com coordenadas GPS encontrada!")
+        print("   Certifique-se que suas fotos são JPG/JPEG com metadados EXIF de GPS")
     
     # Salvar cache
     cache_data = {
@@ -178,16 +330,16 @@ def processar_arquivos():
         'trajetos': trajetos,
         'processed_at': time.time(),
         'total_files': len(arquivos),
-        'image_count': total_imagens,
-        'kml_count': total_kmls
+        'image_count': len(fotos),
+        'kml_count': len(trajetos)
     }
     
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache_data, f, indent=2, ensure_ascii=False)
     
-    print(f"✅ Processamento concluído:")
-    print(f"   📸 Imagens: {len(fotos)}")
-    print(f"   🗺️  KMLs: {len(trajetos)}")
+    print(f"\n✅ Processamento concluído:")
+    print(f"   📸 Fotos com GPS: {len(fotos)}")
+    print(f"   🗺️  Trajetos KML: {len(trajetos)}")
     print(f"   📁 Total arquivos: {len(arquivos)}")
     
     return cache_data
@@ -298,8 +450,8 @@ def status():
             'github_repo': GITHUB_REPO,
             'cache_exists': cache_exists,
             'cache_age_minutes': int(cache_age / 60),
-            'fotos_cached': fotos_count,
-            'trajetos_cached': trajetos_count,
+            'fotos_com_gps': fotos_count,
+            'trajetos_kml': trajetos_count,
             'thumbnails': len(os.listdir(THUMBNAIL_FOLDER)) if os.path.exists(THUMBNAIL_FOLDER) else 0,
             'timestamp': time.time()
         })
@@ -322,7 +474,7 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
     print("=" * 60)
-    print("🗺️  MAPA DE FOTOS - VERSÃO FINAL")
+    print("🗺️  MAPA DE FOTOS - COM EXTRATOR DE COORDENADAS GPS")
     print("=" * 60)
     print(f"📁 Repositório: {GITHUB_REPO}")
     print(f"🔑 Token GitHub: {'Sim' if GITHUB_TOKEN else 'Não (público)'}")
@@ -333,7 +485,7 @@ if __name__ == '__main__':
     try:
         print("🔄 Criando cache inicial...")
         data = processar_arquivos()
-        print(f"✅ Cache criado: {len(data.get('fotos', []))} fotos")
+        print(f"✅ Cache criado: {len(data.get('fotos', []))} fotos com GPS")
     except Exception as e:
         print(f"⚠️  Erro no cache inicial: {e}")
     
