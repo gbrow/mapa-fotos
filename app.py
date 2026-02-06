@@ -5,7 +5,6 @@ from flask_cors import CORS
 import json
 import time
 import hashlib
-from datetime import datetime, timedelta
 from PIL import Image
 from io import BytesIO
 
@@ -21,15 +20,10 @@ os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
 # Configuração do GitHub
 GITHUB_REPO = "gbrow/fotos-mapa"
 GITHUB_BRANCH = "main"
-# Token opcional para maior limite (crie em: GitHub > Settings > Developer settings > Personal access tokens)
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN', '')
 
 # Tamanho da thumbnail
 THUMBNAIL_SIZE = (300, 300)
-
-# Cache de lista de arquivos (24 horas)
-LISTA_ARQUIVOS_CACHE_FILE = os.path.join(BASE_DIR, 'github_files_cache.json')
-LISTA_ARQUIVOS_CACHE_DURATION = 24 * 3600  # 24 horas
 
 def get_github_headers():
     """Headers para requests do GitHub"""
@@ -49,179 +43,80 @@ def get_github_api_url(path=""):
     """Gera URL da API do GitHub"""
     return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
 
-def listar_arquivos_github_com_cache():
-    """Lista arquivos do GitHub com cache de 24h"""
+def listar_arquivos_github():
+    """Lista arquivos do repositório GitHub"""
     try:
-        # Verificar cache primeiro
-        if os.path.exists(LISTA_ARQUIVOS_CACHE_FILE):
-            with open(LISTA_ARQUIVOS_CACHE_FILE, 'r', encoding='utf-8') as f:
-                cache_data = json.load(f)
-                
-            cache_time = cache_data.get('cached_at', 0)
-            if time.time() - cache_time < LISTA_ARQUIVOS_CACHE_DURATION:
-                print(f"📁 Usando cache de arquivos do GitHub ({len(cache_data.get('files', []))} arquivos)")
-                return cache_data.get('files', [])
-    except:
-        pass
-    
-    # Buscar do GitHub
-    print(f"🔍 Buscando arquivos no GitHub: {GITHUB_REPO}")
-    
-    try:
+        print(f"🔍 Conectando ao GitHub: {GITHUB_REPO}")
+        
         response = requests.get(
             get_github_api_url(),
             headers=get_github_headers(),
             timeout=30
         )
         
+        print(f"📡 Status GitHub: {response.status_code}")
+        
         if response.status_code == 200:
             arquivos = response.json()
+            print(f"✅ Conectado ao GitHub")
             
-            # Filtrar apenas arquivos (não pastas)
-            arquivos_filtrados = []
-            for arquivo in (arquivos if isinstance(arquivos, list) else [arquivos]):
-                if isinstance(arquivo, dict) and arquivo.get('type') == 'file':
-                    arquivos_filtrados.append({
-                        'name': arquivo.get('name', ''),
-                        'size': arquivo.get('size', 0),
-                        'type': arquivo.get('type', '')
-                    })
+            # Retornar lista de nomes de arquivos
+            nomes_arquivos = []
+            for item in (arquivos if isinstance(arquivos, list) else [arquivos]):
+                if isinstance(item, dict):
+                    nome = item.get('name', '')
+                    tipo = item.get('type', '')
+                    if tipo == 'file':
+                        nomes_arquivos.append(nome)
             
-            print(f"✅ {len(arquivos_filtrados)} arquivos encontrados")
+            print(f"📁 {len(nomes_arquivos)} arquivos encontrados")
+            return nomes_arquivos
             
-            # Salvar cache
-            cache_data = {
-                'cached_at': time.time(),
-                'files': arquivos_filtrados
-            }
-            with open(LISTA_ARQUIVOS_CACHE_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, indent=2)
-            
-            return arquivos_filtrados
-            
-        elif response.status_code == 403:  # Rate limit
-            print("⚠️  Rate limit do GitHub atingido. Usando cache...")
-            # Tentar usar cache antigo se disponível
-            if os.path.exists(LISTA_ARQUIVOS_CACHE_FILE):
-                with open(LISTA_ARQUIVOS_CACHE_FILE, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
-                return cache_data.get('files', [])
-            else:
-                print("❌ Sem cache disponível")
-                return []
         else:
-            print(f"❌ Erro GitHub API: {response.status_code}")
+            print(f"❌ Erro GitHub: {response.status_code}")
+            print(f"📝 Resposta: {response.text[:200]}")
             return []
             
     except Exception as e:
-        print(f"❌ Erro ao buscar arquivos: {e}")
+        print(f"❌ Erro ao conectar ao GitHub: {e}")
         return []
 
-def processar_imagem_rapida(url, filename):
-    """Processa imagem de forma otimizada (sem EXIF para ser mais rápido)"""
+def criar_thumbnail_da_url(url, filename):
+    """Cria thumbnail a partir de uma URL"""
     try:
-        print(f"📥 Processando: {filename}")
-        
-        # Gerar hash para thumbnail
+        # Gerar nome único para thumbnail
         thumb_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-        thumb_filename = f"{thumb_hash}.jpg"
-        thumb_path = os.path.join(THUMBNAIL_FOLDER, thumb_filename)
+        thumb_name = f"{thumb_hash}.jpg"
+        thumb_path = os.path.join(THUMBNAIL_FOLDER, thumb_name)
         
-        # Se thumbnail já existe, usar
+        # Se já existe, retornar
         if os.path.exists(thumb_path):
-            print(f"  ✅ Thumbnail já existe")
-        else:
-            # Baixar e criar thumbnail
-            response = requests.get(url, timeout=30)
-            if response.status_code == 200:
-                img = Image.open(BytesIO(response.content))
-                img.thumbnail(THUMBNAIL_SIZE)
-                
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    img = img.convert('RGB')
-                
-                img.save(thumb_path, 'JPEG', quality=80, optimize=True)
-                print(f"  ✅ Thumbnail criada")
-            else:
-                print(f"  ❌ Erro ao baixar imagem")
-                return None
+            return thumb_name
         
-        # Usar coordenadas fixas para teste (depois podemos extrair EXIF)
-        # Coordenadas do centro do Brasil como padrão
-        return {
-            'filename': filename,
-            'original_url': url,
-            'thumbnail': f'/thumbnail/{thumb_filename}',
-            'full_image': url,
-            'latitude': -15.7942 + (hash(filename) % 100 - 50) / 1000,  # Variação pequena
-            'longitude': -47.8822 + (hash(filename) % 100 - 50) / 1000,
-            'data_tirada': datetime.now().strftime('%Y-%m-%d'),
-            'processed_at': time.time()
-        }
-        
-    except Exception as e:
-        print(f"❌ Erro ao processar {filename}: {e}")
-        return None
-
-def processar_kml_simples(kml_url, filename):
-    """Processa KML de forma simplificada"""
-    try:
-        print(f"🗺️ Processando KML: {filename}")
-        
-        response = requests.get(kml_url, timeout=30)
-        if response.status_code != 200:
-            return []
-        
-        content = response.text
-        
-        # Extrair coordenadas de forma simples (para KMLs básicos)
-        import re
-        
-        trajetos = []
-        coordinates_pattern = r'<coordinates>([^<]+)</coordinates>'
-        name_pattern = r'<name>([^<]+)</name>'
-        
-        name_match = re.search(name_pattern, content)
-        name = name_match.group(1) if name_match else filename
-        
-        coords_matches = re.findall(coordinates_pattern, content, re.DOTALL)
-        
-        for coords_str in coords_matches:
-            coordenadas = []
-            for line in coords_str.strip().split('\n'):
-                for coord in line.strip().split():
-                    parts = coord.split(',')
-                    if len(parts) >= 2:
-                        try:
-                            lon, lat = float(parts[0]), float(parts[1])
-                            coordenadas.append([lat, lon])
-                        except:
-                            continue
+        # Baixar imagem e criar thumbnail
+        response = requests.get(url, timeout=30)
+        if response.status_code == 200:
+            img = Image.open(BytesIO(response.content))
+            img.thumbnail(THUMBNAIL_SIZE)
             
-            if len(coordenadas) > 1:
-                trajetos.append({
-                    'type': 'LineString',
-                    'name': name,
-                    'filename': filename,
-                    'coordinates': coordenadas,
-                    'color': '#FF0000',
-                    'weight': 3,
-                    'opacity': 0.7
-                })
-        
-        print(f"  ✅ {len(trajetos)} trajeto(s) encontrado(s)")
-        return trajetos
-        
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            
+            img.save(thumb_path, 'JPEG', quality=80, optimize=True)
+            print(f"  ✅ Thumbnail criada: {filename}")
+            return thumb_name
+            
     except Exception as e:
-        print(f"❌ Erro ao processar KML: {e}")
-        return []
-
-def processar_todas_fotos():
-    """Processa todas as fotos e KMLs"""
-    print("🔄 Iniciando processamento...")
+        print(f"  ⚠️  Erro ao criar thumbnail: {e}")
     
-    # Listar arquivos do GitHub
-    arquivos = listar_arquivos_github_com_cache()
+    return None
+
+def processar_arquivos():
+    """Processa arquivos do GitHub"""
+    print("🔄 Processando arquivos...")
+    
+    # Listar arquivos
+    arquivos = listar_arquivos_github()
     
     if not arquivos:
         print("⚠️  Nenhum arquivo encontrado")
@@ -230,38 +125,70 @@ def processar_todas_fotos():
     fotos = []
     trajetos = []
     
-    # Processar cada arquivo
-    for i, arquivo in enumerate(arquivos):
-        filename = arquivo['name']
+    # Contadores
+    total_imagens = 0
+    total_kmls = 0
+    
+    for filename in arquivos:
         url = get_github_raw_url(filename)
         
-        print(f"[{i+1}/{len(arquivos)}] {filename}")
-        
         # Processar imagens
-        if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.heic')):
-            foto = processar_imagem_rapida(url, filename)
-            if foto:
-                fotos.append(foto)
+        if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+            total_imagens += 1
+            
+            thumb_name = criar_thumbnail_da_url(url, filename)
+            
+            if thumb_name:
+                # Coordenadas de exemplo (centro do Brasil com variação)
+                import random
+                lat_base = -15.7942
+                lon_base = -47.8822
+                
+                fotos.append({
+                    'filename': filename,
+                    'original_url': url,
+                    'thumbnail': f'/thumbnail/{thumb_name}',
+                    'full_image': url,
+                    'latitude': lat_base + (random.random() - 0.5) * 5,
+                    'longitude': lon_base + (random.random() - 0.5) * 5,
+                    'data_tirada': '2024-01-01'
+                })
         
-        # Processar KMLs
-        elif filename.lower().endswith(('.kml', '.kmz')):
-            trajetos_kml = processar_kml_simples(url, filename)
-            trajetos.extend(trajetos_kml)
+        # Processar KMLs (simplificado - apenas marca como existente)
+        elif filename.lower().endswith('.kml'):
+            total_kmls += 1
+            trajetos.append({
+                'type': 'LineString',
+                'name': f'Trajeto: {filename}',
+                'filename': filename,
+                'coordinates': [
+                    [-15.7942, -47.8822],
+                    [-15.8000, -47.8900],
+                    [-15.8100, -47.9000]
+                ],
+                'color': '#FF0000',
+                'weight': 3,
+                'opacity': 0.7
+            })
+            print(f"  🗺️  KML encontrado: {filename}")
     
     # Salvar cache
     cache_data = {
         'fotos': fotos,
         'trajetos': trajetos,
         'processed_at': time.time(),
-        'total_files': len(arquivos)
+        'total_files': len(arquivos),
+        'image_count': total_imagens,
+        'kml_count': total_kmls
     }
     
     with open(CACHE_FILE, 'w', encoding='utf-8') as f:
         json.dump(cache_data, f, indent=2, ensure_ascii=False)
     
     print(f"✅ Processamento concluído:")
-    print(f"   📸 Fotos: {len(fotos)}")
-    print(f"   🗺️  Trajetos: {len(trajetos)}")
+    print(f"   📸 Imagens: {len(fotos)}")
+    print(f"   🗺️  KMLs: {len(trajetos)}")
+    print(f"   📁 Total arquivos: {len(arquivos)}")
     
     return cache_data
 
@@ -278,19 +205,26 @@ def serve_static(filename):
 def listar_fotos():
     """Retorna apenas fotos"""
     try:
+        print("📡 Recebida requisição /api/fotos")
+        
+        # Usar cache se disponível e recente (< 1 hora)
         if os.path.exists(CACHE_FILE):
             cache_age = time.time() - os.path.getmtime(CACHE_FILE)
-            if cache_age < 3600:  # 1 hora
+            if cache_age < 3600:
                 with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                    print(f"📊 Retornando {len(data.get('fotos', []))} fotos do cache")
                     return jsonify(data.get('fotos', []))
         
-        data = processar_todas_fotos()
+        # Processar e retornar
+        data = processar_arquivos()
         return jsonify(data.get('fotos', []))
         
     except Exception as e:
         print(f"❌ Erro em /api/fotos: {e}")
-        return jsonify({'error': 'Erro interno', 'details': str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Erro interno', 'message': str(e)}), 500
 
 @app.route('/api/kml')
 def listar_kml():
@@ -298,12 +232,12 @@ def listar_kml():
     try:
         if os.path.exists(CACHE_FILE):
             cache_age = time.time() - os.path.getmtime(CACHE_FILE)
-            if cache_age < 3600:  # 1 hora
+            if cache_age < 3600:
                 with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     return jsonify({'trajetos': data.get('trajetos', [])})
         
-        data = processar_todas_fotos()
+        data = processar_arquivos()
         return jsonify({'trajetos': data.get('trajetos', [])})
         
     except Exception as e:
@@ -312,7 +246,7 @@ def listar_kml():
 
 @app.route('/api/all')
 def listar_tudo():
-    """Retorna tudo de uma vez"""
+    """Retorna tudo"""
     try:
         if os.path.exists(CACHE_FILE):
             cache_age = time.time() - os.path.getmtime(CACHE_FILE)
@@ -320,7 +254,7 @@ def listar_tudo():
                 with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                     return jsonify(json.load(f))
         
-        return jsonify(processar_todas_fotos())
+        return jsonify(processar_arquivos())
         
     except Exception as e:
         print(f"❌ Erro em /api/all: {e}")
@@ -334,8 +268,7 @@ def servir_thumbnail(nome_arquivo):
         return send_file(caminho, mimetype='image/jpeg')
     
     # Thumbnail padrão
-    from PIL import Image
-    img = Image.new('RGB', (300, 300), color='lightgray')
+    img = Image.new('RGB', (300, 200), color='#f0f0f0')
     img_io = BytesIO()
     img.save(img_io, 'JPEG')
     img_io.seek(0)
@@ -345,8 +278,6 @@ def servir_thumbnail(nome_arquivo):
 def status():
     """Status do sistema"""
     try:
-        arquivos = listar_arquivos_github_com_cache()
-        
         cache_exists = os.path.exists(CACHE_FILE)
         cache_age = 0
         fotos_count = 0
@@ -363,48 +294,51 @@ def status():
                 pass
         
         return jsonify({
+            'status': 'online',
             'github_repo': GITHUB_REPO,
-            'github_files': len(arquivos),
             'cache_exists': cache_exists,
             'cache_age_minutes': int(cache_age / 60),
             'fotos_cached': fotos_count,
             'trajetos_cached': trajetos_count,
-            'thumbnails': len(os.listdir(THUMBNAIL_FOLDER)) if os.path.exists(THUMBNAIL_FOLDER) else 0
+            'thumbnails': len(os.listdir(THUMBNAIL_FOLDER)) if os.path.exists(THUMBNAIL_FOLDER) else 0,
+            'timestamp': time.time()
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'status': 'error'}), 500
 
 @app.route('/api/refresh')
 def refresh():
-    """Força atualização do cache"""
-    data = processar_todas_fotos()
+    """Força atualização"""
+    data = processar_arquivos()
     return jsonify({
         'success': True,
         'fotos': len(data.get('fotos', [])),
-        'trajetos': len(data.get('trajetos', []))
+        'trajetos': len(data.get('trajetos', [])),
+        'message': 'Cache atualizado'
     })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
     print("=" * 60)
-    print("🗺️  Mapa de Fotos - Versão Otimizada")
+    print("🗺️  MAPA DE FOTOS - VERSÃO FINAL")
     print("=" * 60)
     print(f"📁 Repositório: {GITHUB_REPO}")
-    print(f"🔑 GitHub Token: {'Sim' if GITHUB_TOKEN else 'Não'}")
-    print("\n🔄 Iniciando cache inicial...")
+    print(f"🔑 Token GitHub: {'Sim' if GITHUB_TOKEN else 'Não (público)'}")
+    print(f"🌐 Porta: {port}")
+    print("=" * 60)
     
-    # Carregar cache inicial
+    # Cache inicial
     try:
-        data = processar_todas_fotos()
-        print(f"📸 Fotos: {len(data.get('fotos', []))}")
-        print(f"🗺️  Trajetos: {len(data.get('trajetos', []))}")
+        print("🔄 Criando cache inicial...")
+        data = processar_arquivos()
+        print(f"✅ Cache criado: {len(data.get('fotos', []))} fotos")
     except Exception as e:
         print(f"⚠️  Erro no cache inicial: {e}")
     
-    print(f"\n🌐 Servidor rodando na porta {port}")
-    print("📊 Status: http://localhost:{port}/api/status")
+    print(f"\n🚀 Servidor pronto!")
+    print(f"📊 Status: http://localhost:{port}/api/status")
     print("=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=False)
