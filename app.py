@@ -9,9 +9,9 @@ from io import BytesIO
 import time
 import re
 import tempfile
-from fastkml import kml
-from fastkml.geometry import LineString, Point
+import xmltodict
 import zipfile
+import xml.etree.ElementTree as ET
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
@@ -45,9 +45,13 @@ def listar_arquivos_github(extensoes=None):
         if response.status_code == 200:
             arquivos = response.json()
             
+            if isinstance(arquivos, dict):
+                # Se for um único arquivo
+                arquivos = [arquivos]
+            
             if extensoes:
                 arquivos = [f for f in arquivos 
-                          if any(f['name'].lower().endswith(ext) for ext in extensoes)]
+                          if 'name' in f and any(f['name'].lower().endswith(ext) for ext in extensoes)]
             
             return arquivos
         else:
@@ -66,12 +70,145 @@ def carregar_urls_automaticamente():
     
     urls = []
     for arquivo in arquivos:
-        if arquivo['type'] == 'file':
+        if isinstance(arquivo, dict) and arquivo.get('type') == 'file':
             url = get_github_raw_url(arquivo['name'])
             urls.append(url)
     
     print(f"📷 {len(urls)} imagens encontradas no GitHub")
     return urls
+
+def extrair_coordenadas_kml(xml_content):
+    """Extrai coordenadas de arquivo KML usando XML parsing"""
+    trajetos = []
+    
+    try:
+        # Tentar parse com xmltodict primeiro
+        try:
+            kml_dict = xmltodict.parse(xml_content)
+            
+            # Extrair Placemarks
+            placemarks = []
+            
+            # Navegar pelo dicionário para encontrar Placemarks
+            def find_placemarks(obj, path=""):
+                if isinstance(obj, dict):
+                    if 'Placemark' in obj:
+                        placemarks.extend(obj['Placemark'] if isinstance(obj['Placemark'], list) else [obj['Placemark']])
+                    
+                    for key, value in obj.items():
+                        find_placemarks(value, f"{path}.{key}")
+                
+                elif isinstance(obj, list):
+                    for item in obj:
+                        find_placemarks(item, path)
+            
+            find_placemarks(kml_dict)
+            
+            for placemark in placemarks:
+                name = placemark.get('name', 'Trajeto')
+                description = placemark.get('description', '')
+                
+                # Extrair LineString
+                if 'LineString' in placemark:
+                    coordinates_str = placemark['LineString'].get('coordinates', '')
+                    if coordinates_str:
+                        coordenadas = []
+                        for coord in coordinates_str.strip().split():
+                            parts = coord.split(',')
+                            if len(parts) >= 2:
+                                lon, lat = float(parts[0]), float(parts[1])
+                                coordenadas.append([lat, lon])
+                        
+                        if len(coordenadas) > 1:
+                            trajetos.append({
+                                'type': 'LineString',
+                                'name': name,
+                                'description': description,
+                                'coordinates': coordenadas,
+                                'color': '#FF0000',
+                                'weight': 4,
+                                'opacity': 0.7,
+                                'dashArray': '5, 5'
+                            })
+                
+                # Extrair Point
+                elif 'Point' in placemark:
+                    coordinates_str = placemark['Point'].get('coordinates', '')
+                    if coordinates_str:
+                        parts = coordinates_str.strip().split(',')
+                        if len(parts) >= 2:
+                            lon, lat = float(parts[0]), float(parts[1])
+                            trajetos.append({
+                                'type': 'Point',
+                                'name': name,
+                                'description': description,
+                                'coordinates': [lat, lon],
+                                'icon': '📍'
+                            })
+        
+        except:
+            # Fallback para ElementTree
+            print("Usando ElementTree como fallback...")
+            root = ET.fromstring(xml_content)
+            
+            # Namespace KML
+            ns = {'kml': 'http://www.opengis.net/kml/2.2'}
+            
+            for placemark in root.findall('.//kml:Placemark', ns):
+                name_elem = placemark.find('kml:name', ns)
+                name = name_elem.text if name_elem is not None else 'Trajeto'
+                
+                desc_elem = placemark.find('kml:description', ns)
+                description = desc_elem.text if desc_elem is not None else ''
+                
+                # LineString
+                linestring = placemark.find('.//kml:LineString', ns)
+                if linestring is not None:
+                    coords_elem = linestring.find('kml:coordinates', ns)
+                    if coords_elem is not None and coords_elem.text:
+                        coordenadas = []
+                        for coord in coords_elem.text.strip().split():
+                            parts = coord.split(',')
+                            if len(parts) >= 2:
+                                lon, lat = float(parts[0]), float(parts[1])
+                                coordenadas.append([lat, lon])
+                        
+                        if len(coordenadas) > 1:
+                            trajetos.append({
+                                'type': 'LineString',
+                                'name': name,
+                                'description': description,
+                                'coordinates': coordenadas,
+                                'color': '#FF0000',
+                                'weight': 4,
+                                'opacity': 0.7,
+                                'dashArray': '5, 5'
+                            })
+                
+                # Point
+                point = placemark.find('.//kml:Point', ns)
+                if point is not None:
+                    coords_elem = point.find('kml:coordinates', ns)
+                    if coords_elem is not None and coords_elem.text:
+                        parts = coords_elem.text.strip().split(',')
+                        if len(parts) >= 2:
+                            lon, lat = float(parts[0]), float(parts[1])
+                            trajetos.append({
+                                'type': 'Point',
+                                'name': name,
+                                'description': description,
+                                'coordinates': [lat, lon],
+                                'icon': '📍'
+                            })
+        
+        print(f"✅ KML processado: {len(trajetos)} elementos")
+        
+    except Exception as e:
+        print(f"❌ Erro ao processar KML: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return trajetos
 
 def processar_kml_da_url(kml_url):
     """Processa KML de uma URL"""
@@ -86,95 +223,29 @@ def processar_kml_da_url(kml_url):
             print(f"❌ Erro ao baixar KML: {response.status_code}")
             return trajetos
         
-        # Salvar temporariamente
-        with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.kml') as temp_file:
-            temp_file.write(response.content)
-            temp_path = temp_file.name
+        content = response.content
         
-        # Processar KML
-        trajetos = processar_kml_arquivo(temp_path)
+        # Verificar se é KMZ (arquivo ZIP)
+        if kml_url.lower().endswith('.kmz'):
+            with tempfile.NamedTemporaryFile(suffix='.kmz', delete=False) as temp_file:
+                temp_file.write(content)
+                temp_path = temp_file.name
+            
+            try:
+                with zipfile.ZipFile(temp_path, 'r') as kmz:
+                    # Encontrar arquivo KML dentro do KMZ
+                    kml_files = [f for f in kmz.namelist() if f.lower().endswith('.kml')]
+                    if kml_files:
+                        with kmz.open(kml_files[0]) as kml_file:
+                            content = kml_file.read()
+            finally:
+                os.unlink(temp_path)
         
-        # Limpar arquivo temporário
-        os.unlink(temp_path)
+        # Processar conteúdo KML
+        trajetos = extrair_coordenadas_kml(content)
         
     except Exception as e:
         print(f"❌ Erro ao processar KML da URL: {e}")
-    
-    return trajetos
-
-def processar_kml_arquivo(kml_path):
-    """Processa arquivo KML/KMZ"""
-    trajetos = []
-    
-    try:
-        # Verificar se é KMZ
-        if kml_path.lower().endswith('.kmz'):
-            with zipfile.ZipFile(kml_path, 'r') as kmz:
-                kml_files = [f for f in kmz.namelist() if f.lower().endswith('.kml')]
-                if not kml_files:
-                    return trajetos
-                
-                with kmz.open(kml_files[0]) as kml_file:
-                    kml_content = kml_file.read()
-                    k = kml.KML()
-                    k.from_string(kml_content)
-        else:
-            with open(kml_path, 'rb') as f:
-                kml_content = f.read()
-                k = kml.KML()
-                k.from_string(kml_content)
-        
-        # Extrair geometrias
-        def extrair_geometrias(feature):
-            geometrias = []
-            
-            if hasattr(feature, 'geometry') and feature.geometry:
-                geometrias.append(feature.geometry)
-            
-            if hasattr(feature, 'features'):
-                for subfeature in feature.features:
-                    geometrias.extend(extrair_geometrias(subfeature))
-            
-            return geometrias
-        
-        # Processar features
-        for document in k.features():
-            for folder in document.features():
-                geometrias = extrair_geometrias(folder)
-                
-                for geom in geometrias:
-                    if isinstance(geom, LineString) and geom.coords:
-                        coordenadas = []
-                        for coord in geom.coords:
-                            # KML: lon, lat, alt -> Leaflet: lat, lon
-                            if len(coord) >= 2:
-                                coordenadas.append([coord[1], coord[0]])
-                        
-                        if len(coordenadas) > 1:
-                            trajetos.append({
-                                'type': 'LineString',
-                                'name': getattr(folder, 'name', 'Trajeto'),
-                                'description': getattr(folder, 'description', ''),
-                                'coordinates': coordenadas,
-                                'color': '#FF0000',
-                                'weight': 4,
-                                'opacity': 0.7,
-                                'dashArray': '5, 5'
-                            })
-                    
-                    elif isinstance(geom, Point) and geom.coords:
-                        trajetos.append({
-                            'type': 'Point',
-                            'name': getattr(folder, 'name', 'Ponto'),
-                            'description': getattr(folder, 'description', ''),
-                            'coordinates': [geom.coords[0][1], geom.coords[0][0]],
-                            'icon': '📍'
-                        })
-        
-        print(f"✅ KML processado: {len(trajetos)} elementos")
-        
-    except Exception as e:
-        print(f"❌ Erro no processamento KML: {e}")
     
     return trajetos
 
@@ -188,7 +259,7 @@ def carregar_kmls_automaticamente():
     todos_trajetos = []
     
     for arquivo in arquivos:
-        if arquivo['type'] == 'file':
+        if isinstance(arquivo, dict) and arquivo.get('type') == 'file':
             kml_url = get_github_raw_url(arquivo['name'])
             trajetos = processar_kml_da_url(kml_url)
             
@@ -455,106 +526,6 @@ def status():
         'thumbnails': len(os.listdir(THUMBNAIL_FOLDER)) if os.path.exists(THUMBNAIL_FOLDER) else 0
     })
 
-# Página de admin para configuração
-@app.route('/admin')
-def admin_page():
-    return f'''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Admin - Configuração</title>
-        <style>
-            body {{ font-family: Arial; padding: 30px; max-width: 800px; margin: 0 auto; }}
-            .card {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0; }}
-            .info {{ background: #e8f4fc; padding: 15px; border-radius: 5px; margin: 10px 0; }}
-            .status-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin: 20px 0; }}
-            .stat {{ background: white; padding: 15px; border-radius: 5px; text-align: center; }}
-            .stat-value {{ font-size: 24px; font-weight: bold; color: #2c3e50; }}
-            .stat-label {{ color: #7f8c8d; font-size: 14px; }}
-            button {{ background: #3498db; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }}
-            .btn-success {{ background: #2ecc71; }}
-        </style>
-    </head>
-    <body>
-        <h1>⚙️ Configuração do Sistema</h1>
-        
-        <div class="card">
-            <h3>📊 Status Atual</h3>
-            <div class="status-grid" id="status-grid">
-                <!-- Preenchido por JavaScript -->
-            </div>
-        </div>
-        
-        <div class="card">
-            <h3>🔄 Ações</h3>
-            <button onclick="refreshAll()" class="btn-success">🔄 Atualizar Tudo (Fotos + KML)</button>
-            <button onclick="clearCache()">🗑️ Limpar Cache</button>
-            <a href="/" style="margin-left: 20px; color: #3498db;">🗺️ Voltar ao Mapa</a>
-        </div>
-        
-        <div class="info">
-            <h3>💡 Configuração Automática</h3>
-            <p>O sistema está configurado para carregar automaticamente do repositório:</p>
-            <p><strong>{GITHUB_REPO}</strong></p>
-            <p>Ele buscará:</p>
-            <ul>
-                <li>📷 Todas as imagens (JPG, PNG, etc.)</li>
-                <li>🗺️ Arquivos KML/KMZ com trajetos</li>
-            </ul>
-            <p>Para alterar o repositório, edite a variável <code>GITHUB_REPO</code> no código.</p>
-        </div>
-        
-        <script>
-            async function loadStatus() {{
-                const response = await fetch('/api/status');
-                const data = await response.json();
-                
-                document.getElementById('status-grid').innerHTML = `
-                    <div class="stat">
-                        <div class="stat-value">${{data.fotos_urls || 0}}</div>
-                        <div class="stat-label">Fotos no GitHub</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-value">${{data.fotos_cache || 0}}</div>
-                        <div class="stat-label">Fotos Processadas</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-value">${{data.trajetos_kml || 0}}</div>
-                        <div class="stat-label">Trajetos KML</div>
-                    </div>
-                    <div class="stat">
-                        <div class="stat-value">${{data.thumbnails || 0}}</div>
-                        <div class="stat-label">Thumbnails</div>
-                    </div>
-                `;
-            }}
-            
-            async function refreshAll() {{
-                if (confirm('Isso irá reprocessar todas as fotos e trajetos. Continuar?')) {{
-                    const response = await fetch('/api/refresh');
-                    const data = await response.json();
-                    alert(`✅ Atualizado!\\nFotos: ${{data.fotos}}\\nTrajetos: ${{data.trajetos}}`);
-                    loadStatus();
-                }}
-            }}
-            
-            async function clearCache() {{
-                if (confirm('Limpar todo o cache? As fotos serão reprocessadas na próxima vez.')) {{
-                    await fetch('/api/refresh?_clear=1');
-                    alert('Cache limpo!');
-                    loadStatus();
-                }}
-            }}
-            
-            // Carregar status inicial
-            loadStatus();
-            // Atualizar a cada 30 segundos
-            setInterval(loadStatus, 30000);
-        </script>
-    </body>
-    </html>
-    '''
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     
@@ -574,7 +545,7 @@ if __name__ == '__main__':
     print(f"🗺️ Trajetos carregados: {len(trajetos)}")
     
     print(f"\n🌐 Servidor rodando na porta {port}")
-    print("⚙️ Admin: http://localhost:{port}/admin")
+    print("⚙️ Status: http://localhost:{port}/api/status")
     print("=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=False)
