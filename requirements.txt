@@ -1,7 +1,4 @@
 Flask
 Flask-CORS
 Pillow
-exifread
-gunicorn
 requests==2.31.0
-xmltodict==0.13.0
