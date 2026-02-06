@@ -4,3 +4,4 @@ Pillow
 exifread
 gunicorn
 requests==2.31.0
+fastkml==0.12  # Para processar KML
